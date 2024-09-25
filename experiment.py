@@ -27,32 +27,50 @@ class VAEXperiment(pl.LightningModule):
             self.hold_graph = self.params['retain_first_backpass']
         except:
             pass
+        self.automatic_optimization = False
 
     def forward(self, input: Tensor, **kwargs) -> Tensor:
         return self.model(input, **kwargs)
 
-    def training_step(self, batch, batch_idx, optimizer_idx = 0):
+    def training_step(self, batch, batch_idx):
         real_img, labels = batch
         self.curr_device = real_img.device
+
+        # opt1, opt2 = self.optimizers() # added these lines
+
+        opts = self.optimizers()
+        if isinstance(opts, list):  # Check if it's a list of optimizers
+            opt1, opt2 = opts
+        else:
+            opt1 = opts
+            opt2 = None
+
+        opt1.zero_grad()  # added these lines
+        if opt2 is not None: opt2.zero_grad() # added these lines
 
         results = self.forward(real_img, labels = labels)
         train_loss = self.model.loss_function(*results,
                                               M_N = self.params['kld_weight'], #al_img.shape[0]/ self.num_train_imgs,
-                                              optimizer_idx=optimizer_idx,
+                                              optimizer_idx=0 if opt2 is None else None, # Check if opt2 exists, if yes, can't use index
                                               batch_idx = batch_idx)
+
+        self.manual_backward(train_loss['loss']) # added these lines
+        opt1.step() # added these lines
+        if opt2 is not None: opt2.step() # added these lines
 
         self.log_dict({key: val.item() for key, val in train_loss.items()}, sync_dist=True)
 
         return train_loss['loss']
 
-    def validation_step(self, batch, batch_idx, optimizer_idx = 0):
+    # def validation_step(self, batch, batch_idx, optimizer_idx = 0):
+    def validation_step(self, batch, batch_idx):
         real_img, labels = batch
         self.curr_device = real_img.device
 
         results = self.forward(real_img, labels = labels)
         val_loss = self.model.loss_function(*results,
                                             M_N = 1.0, #real_img.shape[0]/ self.num_val_imgs,
-                                            optimizer_idx = optimizer_idx,
+                                            optimizer_idx = 0,
                                             batch_idx = batch_idx)
 
         self.log_dict({f"val_{key}": val.item() for key, val in val_loss.items()}, sync_dist=True)
@@ -111,14 +129,16 @@ class VAEXperiment(pl.LightningModule):
             if self.params['scheduler_gamma'] is not None:
                 scheduler = optim.lr_scheduler.ExponentialLR(optims[0],
                                                              gamma = self.params['scheduler_gamma'])
-                scheds.append(scheduler)
+                # scheds.append(scheduler)
+                scheds.append({"scheduler": scheduler, "interval": "epoch"})  # Important: Add interval and monitor
 
                 # Check if another scheduler is required for the second optimizer
                 try:
                     if self.params['scheduler_gamma_2'] is not None:
                         scheduler2 = optim.lr_scheduler.ExponentialLR(optims[1],
                                                                       gamma = self.params['scheduler_gamma_2'])
-                        scheds.append(scheduler2)
+                        # scheds.append(scheduler2)
+                        scheds.append({"scheduler": scheduler2, "interval": "epoch"})  # Important: Add interval and monitor
                 except:
                     pass
                 return optims, scheds
